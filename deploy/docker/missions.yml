@@ -1,0 +1,8 @@
+services:
+  missions:
+    build:
+      context: ../../
+      dockerfile: deploy/docker/Dockerfile.mission
+    environment:
+      - AMAN_PASSPHRASE=mission-test-passphrase
+    command: /missions/run-all.sh

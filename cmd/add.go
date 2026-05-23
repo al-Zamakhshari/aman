@@ -34,12 +34,14 @@ func init() {
 	addCmd.Flags().String("totp", "", "TOTP secret (base32)")
 	addCmd.Flags().StringSlice("tag", nil, "tags (repeatable: --tag prod --tag aws)")
 	addCmd.Flags().Int("threshold", 1, "require K-of-N recipients to cooperate (default: 1 = any recipient)")
+	addCmd.Flags().String("password", "", "entry password (non-interactive; prefer prompt in interactive use)")
 	addCmd.MarkFlagRequired("to") //nolint:errcheck
 }
 
 func runAdd(cmd *cobra.Command, args []string) error {
 	name := args[0]
 
+	var err error
 	identity, err := identityName()
 	if err != nil {
 		return err
@@ -58,12 +60,17 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	tags, _ := cmd.Flags().GetStringSlice("tag")
 	threshold, _ := cmd.Flags().GetInt("threshold")
 
-	// Prompt for password.
-	fmt.Printf("Password for %q (leave blank to skip): ", name)
-	passBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
-	fmt.Println()
-	if err != nil {
-		return err
+	// Resolve entry password: --password flag, then interactive prompt.
+	var passBytes []byte
+	if pw, _ := cmd.Flags().GetString("password"); pw != "" {
+		passBytes = []byte(pw)
+	} else {
+		fmt.Printf("Password for %q (leave blank to skip): ", name)
+		passBytes, err = term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Println()
+		if err != nil {
+			return err
+		}
 	}
 
 	payload := &entry.Payload{

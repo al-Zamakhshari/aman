@@ -90,6 +90,10 @@ func runKeygen(cmd *cobra.Command, _ []string) error {
 }
 
 func promptPassphrase(prompt string, confirm bool) ([]byte, error) {
+	// Allow non-interactive use via AMAN_PASSPHRASE (CI / mission tests).
+	if env := os.Getenv("AMAN_PASSPHRASE"); env != "" {
+		return []byte(env), nil
+	}
 	fmt.Print(prompt)
 	pass, err := term.ReadPassword(int(os.Stdin.Fd()))
 	fmt.Println()
@@ -122,6 +126,10 @@ func loadKeyPair(identity string) (*crypto.KeyPair, error) {
 			return nil, fmt.Errorf("key file not found at %s — run: aman keygen --name %s", kf, identity)
 		}
 		return nil, err
+	}
+	// Allow non-interactive use via AMAN_PASSPHRASE (CI / mission tests).
+	if env := os.Getenv("AMAN_PASSPHRASE"); env != "" {
+		return crypto.OpenKeyPair(data, []byte(env))
 	}
 	fmt.Printf("Passphrase for %s: ", identity)
 	pass, err := term.ReadPassword(int(os.Stdin.Fd()))
