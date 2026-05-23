@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/al-Zamakhshari/aman/internal/crypto"
@@ -48,8 +49,8 @@ type Entry struct {
 	Tags       []string                `json:"tags,omitempty"`
 }
 
-// signable is the subset of Entry fields that are signed.
-type signable struct {
+// signableV1 is the v1 signable struct — does not include UpdatedAt.
+type signableV1 struct {
 	Version    int                     `json:"version"`
 	Name       string                  `json:"name"`
 	CreatedBy  string                  `json:"created_by"`
@@ -62,8 +63,38 @@ type signable struct {
 	Tags       []string                `json:"tags,omitempty"`
 }
 
+// signableV2 includes UpdatedAt for rollback-attack protection.
+type signableV2 struct {
+	Version    int                     `json:"version"`
+	Name       string                  `json:"name"`
+	CreatedBy  string                  `json:"created_by"`
+	CreatedAt  time.Time               `json:"created_at"`
+	UpdatedAt  time.Time               `json:"updated_at"`
+	Recipients []string                `json:"recipients"`
+	Threshold  int                     `json:"threshold"`
+	Blocks     []crypto.RecipientBlock `json:"recipient_blocks"`
+	Nonce      []byte                  `json:"nonce"`
+	Ciphertext []byte                  `json:"ciphertext"`
+	Tags       []string                `json:"tags,omitempty"`
+}
+
 func sigPayload(e *Entry) ([]byte, error) {
-	return json.Marshal(signable{
+	if e.Version >= 2 {
+		return json.Marshal(signableV2{
+			Version:    e.Version,
+			Name:       e.Name,
+			CreatedBy:  e.CreatedBy,
+			CreatedAt:  e.CreatedAt,
+			UpdatedAt:  e.UpdatedAt,
+			Recipients: e.Recipients,
+			Threshold:  e.Threshold,
+			Blocks:     e.Blocks,
+			Nonce:      e.Nonce,
+			Ciphertext: e.Ciphertext,
+			Tags:       e.Tags,
+		})
+	}
+	return json.Marshal(signableV1{
 		Version:    e.Version,
 		Name:       e.Name,
 		CreatedBy:  e.CreatedBy,
@@ -80,6 +111,9 @@ func sigPayload(e *Entry) ([]byte, error) {
 // Seal creates and signs a new entry, encrypting payload to all recipients.
 // threshold=1: any recipient can decrypt independently.
 // threshold=K>1: K recipients must cooperate (Shamir M-of-N).
+// createdAt: original creation time; pass zero to use now (for brand-new entries).
+// Passing the original createdAt for re-seals (grant/revoke/edit) ensures the
+// preserved timestamp is covered by the signature, preventing tampering.
 func Seal(
 	name string,
 	createdBy string,
@@ -90,6 +124,7 @@ func Seal(
 	vaultName string,
 	tags []string,
 	threshold int,
+	createdAt time.Time,
 ) (*Entry, error) {
 	if threshold < 1 {
 		threshold = 1
@@ -130,11 +165,14 @@ func Seal(
 	}
 
 	now := time.Now().UTC()
+	if createdAt.IsZero() {
+		createdAt = now
+	}
 	e := &Entry{
-		Version:    1,
+		Version:    2,
 		Name:       name,
 		CreatedBy:  createdBy,
-		CreatedAt:  now,
+		CreatedAt:  createdAt,
 		UpdatedAt:  now,
 		Recipients: recipients,
 		Threshold:  threshold,
@@ -170,7 +208,7 @@ func Open(e *Entry, myName string, myKP *crypto.KeyPair, vaultName string) (*Pay
 		return nil, fmt.Errorf("you (%s) are not a recipient of %q", myName, e.Name)
 	}
 
-	info := crypto.EntryInfo(vaultName, e.Name)
+	info := crypto.EntryInfoForVersion(e.Version, vaultName, e.Name)
 	fek, err := crypto.UnwrapFEK(myKP.KEMPriv, block.SealedFEK, info)
 	if err != nil {
 		return nil, err
@@ -192,7 +230,7 @@ func CollectShare(e *Entry, myName string, myKP *crypto.KeyPair, vaultName strin
 		return nil, fmt.Errorf("you (%s) are not a recipient of %q", myName, e.Name)
 	}
 
-	info := crypto.EntryInfo(vaultName, e.Name)
+	info := crypto.EntryInfoForVersion(e.Version, vaultName, e.Name)
 	shareBytes, err := crypto.UnwrapFEK(myKP.KEMPriv, block.SealedFEK, info)
 	if err != nil {
 		return nil, err
@@ -243,10 +281,23 @@ func Fingerprint(name string) string {
 	return fmt.Sprintf("%x", h[:4])
 }
 
-// EntryPath returns the path for an entry file within the vault.
-func EntryPath(vaultDir, name string) string {
-	return filepath.Join(vaultDir, "entries", name+FileExt)
+// EntryPath returns the validated path for an entry file within the vault.
+// Returns an error if name contains path-traversal sequences that would
+// escape the entries directory.
+func EntryPath(vaultDir, name string) (string, error) {
+	if name == "" {
+		return "", fmt.Errorf("entry name cannot be empty")
+	}
+	base := filepath.Join(vaultDir, entriesDir)
+	p := filepath.Join(base, name+FileExt)
+	// filepath.Join already cleans the path; verify it stays inside entries/.
+	if !strings.HasPrefix(p, base+string(filepath.Separator)) {
+		return "", fmt.Errorf("entry name %q is invalid", name)
+	}
+	return p, nil
 }
+
+const entriesDir = "entries"
 
 // Save writes an entry to disk as JSON.
 func Save(e *Entry, path string) error {

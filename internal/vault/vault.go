@@ -33,10 +33,10 @@ type Config struct {
 
 // Vault is the handle for all vault operations.
 type Vault struct {
-	Dir      string
-	Cfg      *Config
-	Members  *member.Registry
-	Audit    *audit.Logger
+	Dir     string
+	Cfg     *Config
+	Members *member.Registry
+	Audit   *audit.Logger
 }
 
 // Init creates a new vault in dir.
@@ -108,7 +108,10 @@ func (v *Vault) Add(
 	tags []string,
 	threshold int,
 ) error {
-	path := entry.EntryPath(v.Dir, name)
+	path, err := entry.EntryPath(v.Dir, name)
+	if err != nil {
+		return err
+	}
 	if _, err := os.Stat(path); err == nil {
 		return fmt.Errorf("entry %q already exists (use edit to update)", name)
 	}
@@ -118,7 +121,7 @@ func (v *Vault) Add(
 		return err
 	}
 
-	e, err := entry.Seal(name, actor, payload, recipients, bundles, signerKP, v.Cfg.Name, tags, threshold)
+	e, err := entry.Seal(name, actor, payload, recipients, bundles, signerKP, v.Cfg.Name, tags, threshold, time.Time{})
 	if err != nil {
 		return fmt.Errorf("seal entry: %w", err)
 	}
@@ -132,9 +135,19 @@ func (v *Vault) Add(
 }
 
 // Get decrypts and returns an entry's payload.
+// The entry's signature is verified against the creator's registered public key
+// before decryption. Tampered or unsigned entries are rejected.
 func (v *Vault) Get(name, myName string, myKP *crypto.KeyPair) (*entry.Payload, error) {
-	e, err := entry.Load(entry.EntryPath(v.Dir, name))
+	path, err := entry.EntryPath(v.Dir, name)
 	if err != nil {
+		return nil, err
+	}
+	e, err := entry.Load(path)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := v.verifySig(e); err != nil {
 		return nil, err
 	}
 
@@ -189,9 +202,16 @@ func (v *Vault) List(myName string) ([]ListItem, error) {
 
 // Grant re-encrypts an entry to add a new recipient.
 func (v *Vault) Grant(name, newRecipient, actor string, myName string, myKP *crypto.KeyPair) error {
-	path := entry.EntryPath(v.Dir, name)
+	path, err := entry.EntryPath(v.Dir, name)
+	if err != nil {
+		return err
+	}
 	e, err := entry.Load(path)
 	if err != nil {
+		return err
+	}
+
+	if err := v.verifySig(e); err != nil {
 		return err
 	}
 
@@ -215,11 +235,10 @@ func (v *Vault) Grant(name, newRecipient, actor string, myName string, myKP *cry
 		return err
 	}
 
-	newEntry, err := entry.Seal(name, actor, payload, newRecipients, bundles, myKP, v.Cfg.Name, e.Tags, e.Threshold)
+	newEntry, err := entry.Seal(name, actor, payload, newRecipients, bundles, myKP, v.Cfg.Name, e.Tags, e.Threshold, e.CreatedAt)
 	if err != nil {
 		return err
 	}
-	newEntry.CreatedAt = e.CreatedAt // preserve original creation time
 
 	if err := entry.Save(newEntry, path); err != nil {
 		return err
@@ -233,9 +252,16 @@ func (v *Vault) Grant(name, newRecipient, actor string, myName string, myKP *cry
 // longer decrypt future versions; past versions they may have cached are unaffected
 // (rotate the secret itself if that matters).
 func (v *Vault) Revoke(name, removeRecipient, actor string, myName string, myKP *crypto.KeyPair) error {
-	path := entry.EntryPath(v.Dir, name)
+	path, err := entry.EntryPath(v.Dir, name)
+	if err != nil {
+		return err
+	}
 	e, err := entry.Load(path)
 	if err != nil {
+		return err
+	}
+
+	if err := v.verifySig(e); err != nil {
 		return err
 	}
 
@@ -268,11 +294,10 @@ func (v *Vault) Revoke(name, removeRecipient, actor string, myName string, myKP 
 		return err
 	}
 
-	newEntry, err := entry.Seal(name, actor, payload, newRecipients, bundles, myKP, v.Cfg.Name, e.Tags, e.Threshold)
+	newEntry, err := entry.Seal(name, actor, payload, newRecipients, bundles, myKP, v.Cfg.Name, e.Tags, e.Threshold, e.CreatedAt)
 	if err != nil {
 		return err
 	}
-	newEntry.CreatedAt = e.CreatedAt
 
 	if err := entry.Save(newEntry, path); err != nil {
 		return err
@@ -284,7 +309,10 @@ func (v *Vault) Revoke(name, removeRecipient, actor string, myName string, myKP 
 
 // Delete removes an entry file permanently.
 func (v *Vault) Delete(name, actor string) error {
-	path := entry.EntryPath(v.Dir, name)
+	path, err := entry.EntryPath(v.Dir, name)
+	if err != nil {
+		return err
+	}
 	if err := os.Remove(path); err != nil {
 		if os.IsNotExist(err) {
 			return fmt.Errorf("entry %q not found", name)
@@ -292,6 +320,184 @@ func (v *Vault) Delete(name, actor string) error {
 		return err
 	}
 	v.Audit.Append(audit.Event{Action: "delete", Entry: name, Actor: actor})
+	return nil
+}
+
+// Rotate re-encrypts all accessible entries replacing the caller's old public key
+// with a new one. Call after generating a replacement keypair with 'aman keygen'.
+// Returns the number of entries successfully rotated.
+func (v *Vault) Rotate(myName string, oldKP, newKP *crypto.KeyPair) (int, error) {
+	items, err := v.List(myName)
+	if err != nil {
+		return 0, err
+	}
+
+	// Pre-compute the new public bundle once.
+	newPubData, err := crypto.MarshalPublicBundle(newKP)
+	if err != nil {
+		return 0, fmt.Errorf("marshal new public bundle: %w", err)
+	}
+	newBundle, err := crypto.LoadPublicBundle(newPubData)
+	if err != nil {
+		return 0, err
+	}
+
+	var rotated int
+	for _, item := range items {
+		if !item.CanDecrypt {
+			continue
+		}
+
+		path, err := entry.EntryPath(v.Dir, item.Name)
+		if err != nil {
+			return rotated, err
+		}
+		e, err := entry.Load(path)
+		if err != nil {
+			return rotated, fmt.Errorf("load %q: %w", item.Name, err)
+		}
+
+		// Decrypt with the old key (skip sig verification — the old key may differ from registry).
+		payload, err := entry.Open(e, myName, oldKP, v.Cfg.Name)
+		if err != nil {
+			return rotated, fmt.Errorf("decrypt %q: %w", item.Name, err)
+		}
+
+		// Re-seal: replace myName's bundle with the new one.
+		bundles, err := v.Members.GetAll(e.Recipients)
+		if err != nil {
+			return rotated, err
+		}
+		bundles[myName] = newBundle
+
+		newEntry, err := entry.Seal(item.Name, myName, payload, e.Recipients, bundles, newKP, v.Cfg.Name, e.Tags, e.Threshold, e.CreatedAt)
+		if err != nil {
+			return rotated, fmt.Errorf("re-seal %q: %w", item.Name, err)
+		}
+
+		if err := entry.Save(newEntry, path); err != nil {
+			return rotated, fmt.Errorf("save %q: %w", item.Name, err)
+		}
+		rotated++
+	}
+
+	// Update the member registry with the new public key.
+	if err := v.Members.Update(myName, newBundle); err != nil {
+		return rotated, fmt.Errorf("update member registry: %w", err)
+	}
+
+	v.Audit.Append(audit.Event{Action: "rotate", Actor: myName})
+	return rotated, nil
+}
+
+// Migrate re-seals all v1 entries accessible to the caller as v2 (new EntryInfo, UpdatedAt in sig).
+// Returns the number of entries migrated.
+func (v *Vault) Migrate(myName string, myKP *crypto.KeyPair) (int, error) {
+	items, err := v.List(myName)
+	if err != nil {
+		return 0, err
+	}
+
+	var migrated int
+	for _, item := range items {
+		if !item.CanDecrypt {
+			continue
+		}
+
+		path, err := entry.EntryPath(v.Dir, item.Name)
+		if err != nil {
+			return migrated, err
+		}
+		e, err := entry.Load(path)
+		if err != nil {
+			return migrated, fmt.Errorf("load %q: %w", item.Name, err)
+		}
+		if e.Version >= 2 {
+			continue // already v2
+		}
+
+		// Decrypt with v1 info.
+		payload, err := entry.Open(e, myName, myKP, v.Cfg.Name)
+		if err != nil {
+			return migrated, fmt.Errorf("decrypt %q: %w", item.Name, err)
+		}
+
+		bundles, err := v.Members.GetAll(e.Recipients)
+		if err != nil {
+			return migrated, err
+		}
+
+		// Re-seal as v2.
+		newEntry, err := entry.Seal(item.Name, myName, payload, e.Recipients, bundles, myKP, v.Cfg.Name, e.Tags, e.Threshold, e.CreatedAt)
+		if err != nil {
+			return migrated, fmt.Errorf("re-seal %q: %w", item.Name, err)
+		}
+
+		if err := entry.Save(newEntry, path); err != nil {
+			return migrated, fmt.Errorf("save %q: %w", item.Name, err)
+		}
+		migrated++
+	}
+
+	v.Audit.Append(audit.Event{Action: "migrate", Actor: myName})
+	return migrated, nil
+}
+
+// VerifyAll checks signatures on all entries and returns per-entry results.
+func (v *Vault) VerifyAll() ([]VerifyResult, error) {
+	items, err := v.List("")
+	if err != nil {
+		return nil, err
+	}
+
+	results := make([]VerifyResult, 0, len(items))
+	for _, item := range items {
+		path, err := entry.EntryPath(v.Dir, item.Name)
+		if err != nil {
+			results = append(results, VerifyResult{Name: item.Name, Err: err})
+			continue
+		}
+		e, err := entry.Load(path)
+		if err != nil {
+			results = append(results, VerifyResult{Name: item.Name, Err: err})
+			continue
+		}
+		err = v.verifySig(e)
+		results = append(results, VerifyResult{
+			Name:      item.Name,
+			CreatedBy: e.CreatedBy,
+			Version:   e.Version,
+			OK:        err == nil,
+			Err:       err,
+		})
+	}
+	return results, nil
+}
+
+// VerifyResult holds the outcome of a signature check for one entry.
+type VerifyResult struct {
+	Name      string
+	CreatedBy string
+	Version   int
+	OK        bool
+	Err       error
+}
+
+// verifySig checks the ML-DSA-87 signature on an entry against the creator's
+// registered public key. Returns a descriptive error if verification fails.
+func (v *Vault) verifySig(e *entry.Entry) error {
+	bundle, err := v.Members.Get(e.CreatedBy)
+	if err != nil {
+		return fmt.Errorf("cannot verify %q: creator %q not in registry — "+
+			"run: aman member add %s <pubkey>", e.Name, e.CreatedBy, e.CreatedBy)
+	}
+	ok, err := entry.VerifySig(e, bundle)
+	if err != nil {
+		return fmt.Errorf("signature check failed for %q: %w", e.Name, err)
+	}
+	if !ok {
+		return fmt.Errorf("⚠ signature verification FAILED for %q — entry may be tampered", e.Name)
+	}
 	return nil
 }
 

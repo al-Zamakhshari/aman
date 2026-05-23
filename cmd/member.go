@@ -50,9 +50,10 @@ func init() {
 	memberCmd.AddCommand(memberAddCmd)
 	memberCmd.AddCommand(memberListCmd)
 	memberCmd.AddCommand(memberRemoveCmd)
+	memberAddCmd.Flags().Bool("yes", false, "skip confirmation prompt")
 }
 
-func runMemberAdd(_ *cobra.Command, args []string) error {
+func runMemberAdd(cmd *cobra.Command, args []string) error {
 	name := args[0]
 	pubFile := args[1]
 
@@ -69,6 +70,18 @@ func runMemberAdd(_ *cobra.Command, args []string) error {
 	bundle, err := crypto.LoadPublicBundle(data)
 	if err != nil {
 		return fmt.Errorf("parse pubkey: %w", err)
+	}
+
+	fp := crypto.Fingerprint(bundle)
+	fmt.Printf("  Member : %s\n", name)
+	fmt.Printf("  Key    : %s\n", pubFile)
+	fmt.Printf("  Fingerprint: %s\n\n", fp)
+	fmt.Println("Verify this fingerprint matches what the member reported out-of-band.")
+
+	yes, _ := cmd.Flags().GetBool("yes")
+	if !yes && !confirmPrompt(fmt.Sprintf("Add %q with fingerprint %s?", name, fp)) {
+		fmt.Println("Aborted.")
+		return nil
 	}
 
 	if err := v.Members.Add(name, bundle); err != nil {
@@ -98,7 +111,12 @@ func runMemberList(_ *cobra.Command, _ []string) error {
 
 	fmt.Printf("Members in vault %q:\n", v.Cfg.Name)
 	for _, n := range names {
-		fmt.Printf("  • %s\n", n)
+		bundle, err := v.Members.Get(n)
+		if err != nil {
+			fmt.Printf("  • %-20s  (error loading key)\n", n)
+			continue
+		}
+		fmt.Printf("  • %-20s  %s\n", n, crypto.Fingerprint(bundle))
 	}
 	return nil
 }

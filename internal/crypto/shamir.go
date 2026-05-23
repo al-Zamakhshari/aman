@@ -19,15 +19,18 @@ type ShamirShare struct {
 	Threshold byte   `json:"t"`
 	Index     byte   `json:"i"`
 	Data      []byte `json:"d"`
+	HMACKey   []byte `json:"k,omitempty"` // random per-share HMAC key (v2+); absent in v1 shares
 	Checksum  []byte `json:"c"`
 }
 
 const (
-	shamirVersion  = 1
-	shamirChkSize  = 16
+	shamirVersion = 1
+	shamirChkSize = 16
+	shamirKeySize = 16
 )
 
-var shamirChkKey = []byte("aman SSS share checksum v1")
+// shamirChkKeyLegacy is the hardcoded key used by v1 shares — kept for backward compat only.
+var shamirChkKeyLegacy = []byte("aman SSS share checksum v1")
 
 // GF(2^8) tables — initialised once.
 var (
@@ -116,7 +119,12 @@ func SplitFEK(fek []byte, m, n int) ([]ShamirShare, error) {
 	}
 
 	for i := range shares {
-		h := hmac.New(newSHA256, shamirChkKey)
+		key := make([]byte, shamirKeySize)
+		if _, err := rand.Read(key); err != nil {
+			return nil, fmt.Errorf("rand hmac key: %w", err)
+		}
+		shares[i].HMACKey = key
+		h := hmac.New(newSHA256, key)
 		h.Write([]byte{shares[i].Version, shares[i].Threshold, shares[i].Index})
 		h.Write(shares[i].Data)
 		sum := h.Sum(nil)
@@ -151,7 +159,12 @@ func CombineFEK(shares []ShamirShare) ([]byte, error) {
 		if len(s.Data) != secretLen {
 			return nil, errors.New("inconsistent share data length")
 		}
-		h := hmac.New(newSHA256, shamirChkKey)
+		// Use the per-share HMAC key if present (v2+); fall back to legacy key for v1 shares.
+		chkKey := s.HMACKey
+		if len(chkKey) == 0 {
+			chkKey = shamirChkKeyLegacy
+		}
+		h := hmac.New(newSHA256, chkKey)
 		h.Write([]byte{s.Version, s.Threshold, s.Index})
 		h.Write(s.Data)
 		sum := h.Sum(nil)

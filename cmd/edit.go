@@ -98,7 +98,11 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	}
 
 	// Load the current entry to get the recipient list.
-	e, err := entry.Load(entry.EntryPath(v.Dir, name))
+	entryPath, err := entry.EntryPath(v.Dir, name)
+	if err != nil {
+		return err
+	}
+	e, err := entry.Load(entryPath)
 	if err != nil {
 		return err
 	}
@@ -109,13 +113,12 @@ func runEdit(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	newEntry, err := entry.Seal(name, identity, payload, e.Recipients, bundles, kp, v.Cfg.Name, e.Tags, e.Threshold)
+	newEntry, err := entry.Seal(name, identity, payload, e.Recipients, bundles, kp, v.Cfg.Name, e.Tags, e.Threshold, e.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("re-seal: %w", err)
 	}
-	newEntry.CreatedAt = e.CreatedAt // preserve original creation time
 
-	if err := entry.Save(newEntry, entry.EntryPath(v.Dir, name)); err != nil {
+	if err := entry.Save(newEntry, entryPath); err != nil {
 		return err
 	}
 

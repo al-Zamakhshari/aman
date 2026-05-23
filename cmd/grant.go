@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 
+	"github.com/al-Zamakhshari/aman/internal/crypto"
 	"github.com/spf13/cobra"
 )
 
@@ -14,8 +15,12 @@ var grantCmd = &cobra.Command{
 You must be a current recipient to grant access (you need to decrypt
 the secret to re-encrypt it for the new person).
 
+The recipient's key fingerprint is shown before committing — verify it
+out-of-band to protect against key substitution attacks.
+
 Example:
-  aman grant github --to carol`,
+  aman grant github --to carol
+  aman grant github --to carol --yes   # skip confirmation`,
 	Args: cobra.ExactArgs(1),
 	RunE: runGrant,
 }
@@ -38,6 +43,7 @@ Example:
 func init() {
 	rootCmd.AddCommand(grantCmd)
 	grantCmd.Flags().String("to", "", "member to grant access to (required)")
+	grantCmd.Flags().Bool("yes", false, "skip confirmation prompt")
 	grantCmd.MarkFlagRequired("to") //nolint:errcheck
 
 	rootCmd.AddCommand(revokeCmd)
@@ -48,6 +54,7 @@ func init() {
 func runGrant(cmd *cobra.Command, args []string) error {
 	secretName := args[0]
 	newMember, _ := cmd.Flags().GetString("to")
+	yes, _ := cmd.Flags().GetBool("yes")
 
 	identity, err := identityName()
 	if err != nil {
@@ -62,6 +69,22 @@ func runGrant(cmd *cobra.Command, args []string) error {
 	v, err := openVault()
 	if err != nil {
 		return err
+	}
+
+	// Show the recipient's key fingerprint before committing.
+	if !yes {
+		bundle, err := v.Members.Get(newMember)
+		if err != nil {
+			return fmt.Errorf("member %q not found — register them first with 'aman member add'", newMember)
+		}
+		fp := crypto.Fingerprint(bundle)
+		fmt.Printf("  Granting access to : %s\n", newMember)
+		fmt.Printf("  Key fingerprint    : %s\n\n", fp)
+		fmt.Println("Verify this fingerprint matches what the member reported out-of-band.")
+		if !confirmPrompt(fmt.Sprintf("Grant %q access to %q?", newMember, secretName)) {
+			fmt.Println("Aborted.")
+			return nil
+		}
 	}
 
 	if err := v.Grant(secretName, newMember, identity, identity, kp); err != nil {

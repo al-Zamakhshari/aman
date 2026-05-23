@@ -8,6 +8,7 @@ import (
 	"crypto/hpke"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -273,14 +274,45 @@ func Verify(pub *mldsa87.PublicKey, data, sig []byte) bool {
 	return mldsa87.Verify(pub, data, nil, sig)
 }
 
-// EntryInfo returns the HPKE info bytes for a given vault+entry pair.
-// This binds the ciphertext to a specific entry name and vault, preventing
-// ciphertexts from being moved between entries.
+// EntryInfo returns the HPKE info bytes for a given vault+entry pair (v2 format).
+// Uses length-prefixed encoding to prevent separator-ambiguity attacks.
 func EntryInfo(vaultName, entryName string) []byte {
+	h := sha256.New()
+	h.Write([]byte("aman:entry:v2:"))
+	var buf [4]byte
+	binary.BigEndian.PutUint32(buf[:], uint32(len(vaultName)))
+	h.Write(buf[:])
+	h.Write([]byte(vaultName))
+	binary.BigEndian.PutUint32(buf[:], uint32(len(entryName)))
+	h.Write(buf[:])
+	h.Write([]byte(entryName))
+	return h.Sum(nil)
+}
+
+// entryInfoV1 is the original v1 HPKE info with ambiguous colon separator.
+// Kept for reading/migrating v1 entries — do not use for new entries.
+func entryInfoV1(vaultName, entryName string) []byte {
 	h := sha256.New()
 	h.Write([]byte("aman:entry:"))
 	h.Write([]byte(vaultName))
 	h.Write([]byte(":"))
 	h.Write([]byte(entryName))
 	return h.Sum(nil)
+}
+
+// EntryInfoForVersion returns the appropriate HPKE info for the given entry version.
+func EntryInfoForVersion(version int, vaultName, entryName string) []byte {
+	if version >= 2 {
+		return EntryInfo(vaultName, entryName)
+	}
+	return entryInfoV1(vaultName, entryName)
+}
+
+// Fingerprint returns a short human-readable identifier for a public bundle.
+// It is the first 8 bytes of SHA-256(KEMPublic || SIGPublic), hex-encoded (16 chars).
+func Fingerprint(b *PublicBundle) string {
+	h := sha256.New()
+	h.Write(b.KEMPublic)
+	h.Write(b.SIGPublic)
+	return fmt.Sprintf("%x", h.Sum(nil)[:8])
 }

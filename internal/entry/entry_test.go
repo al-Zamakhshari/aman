@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/al-Zamakhshari/aman/internal/crypto"
 	"github.com/al-Zamakhshari/aman/internal/entry"
@@ -47,7 +48,7 @@ func TestSealOpen_SingleRecipient(t *testing.T) {
 		Notes:    "main deploy key",
 	}
 
-	e, err := entry.Seal("github", "alice", payload, []string{"alice"}, bundles, alice, "test-vault", nil, 1)
+	e, err := entry.Seal("github", "alice", payload, []string{"alice"}, bundles, alice, "test-vault", nil, 1, time.Time{})
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -91,7 +92,7 @@ func TestSealOpen_MultipleRecipients(t *testing.T) {
 
 	payload := &entry.Payload{Password: "shared-secret-42"}
 
-	e, err := entry.Seal("stripe", "alice", payload, []string{"alice", "bob"}, bundles, alice, "acme-vault", []string{"prod"}, 1)
+	e, err := entry.Seal("stripe", "alice", payload, []string{"alice", "bob"}, bundles, alice, "acme-vault", []string{"prod"}, 1, time.Time{})
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -124,7 +125,7 @@ func TestVerifySig(t *testing.T) {
 	bundles := makeBundles(t, map[string]*crypto.KeyPair{"alice": alice})
 
 	payload := &entry.Payload{Password: "verified"}
-	e, err := entry.Seal("svc", "alice", payload, []string{"alice"}, bundles, alice, "vault", nil, 1)
+	e, err := entry.Seal("svc", "alice", payload, []string{"alice"}, bundles, alice, "vault", nil, 1, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +156,7 @@ func TestVaultBinding(t *testing.T) {
 	bundles := makeBundles(t, map[string]*crypto.KeyPair{"alice": alice})
 	payload := &entry.Payload{Password: "bound"}
 
-	e, err := entry.Seal("secret", "alice", payload, []string{"alice"}, bundles, alice, "vault-A", nil, 1)
+	e, err := entry.Seal("secret", "alice", payload, []string{"alice"}, bundles, alice, "vault-A", nil, 1, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +179,7 @@ func TestSaveLoad(t *testing.T) {
 	bundles := makeBundles(t, map[string]*crypto.KeyPair{"alice": alice})
 	payload := &entry.Payload{Password: "persisted", Username: "u@example.com"}
 
-	e, err := entry.Seal("saved", "alice", payload, []string{"alice"}, bundles, alice, "v", nil, 1)
+	e, err := entry.Seal("saved", "alice", payload, []string{"alice"}, bundles, alice, "v", nil, 1, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}

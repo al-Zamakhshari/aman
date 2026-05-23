@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/al-Zamakhshari/aman/internal/clipboard"
 	"github.com/al-Zamakhshari/aman/internal/crypto"
@@ -42,26 +43,22 @@ func runGet(cmd *cobra.Command, args []string) error {
 	noClip, _ := cmd.Flags().GetBool("no-clipboard")
 	sharePaths, _ := cmd.Flags().GetStringSlice("shares")
 
-	identity, err := identityName()
-	if err != nil {
-		return err
-	}
-
 	v, err := openVault()
 	if err != nil {
 		return err
 	}
 
-	var payload interface{ GetPassword() string }
-	_ = payload
-
 	// Threshold path: combine shares without our private key.
 	if len(sharePaths) > 0 {
-		e, err := entry.Load(entry.EntryPath(v.Dir, name))
+		entryPath, err := entry.EntryPath(v.Dir, name)
 		if err != nil {
 			return err
 		}
-		shares, err := loadShareFiles(sharePaths)
+		e, err := entry.Load(entryPath)
+		if err != nil {
+			return err
+		}
+		shares, err := loadShareFiles(sharePaths, v.Cfg.Name, name)
 		if err != nil {
 			return err
 		}
@@ -73,6 +70,10 @@ func runGet(cmd *cobra.Command, args []string) error {
 	}
 
 	// Normal single-recipient path.
+	identity, err := identityName()
+	if err != nil {
+		return err
+	}
 	kp, err := loadKeyPair(identity)
 	if err != nil {
 		return err
@@ -85,21 +86,35 @@ func runGet(cmd *cobra.Command, args []string) error {
 	return printOrCopy(p, name, field, noClip)
 }
 
-// loadShareFiles reads .share files produced by 'aman collect'.
-func loadShareFiles(paths []string) ([]*crypto.ShamirShare, error) {
-	type shareFile struct {
-		Share json.RawMessage `json:"share"`
-	}
+// loadShareFiles reads and validates .share files produced by 'aman collect'.
+func loadShareFiles(paths []string, vaultName, entryName string) ([]*crypto.ShamirShare, error) {
 	var shares []*crypto.ShamirShare
+	now := time.Now().UTC()
+
 	for _, p := range paths {
 		data, err := os.ReadFile(p) //nolint:gosec
 		if err != nil {
 			return nil, fmt.Errorf("read share file %s: %w", p, err)
 		}
-		var sf shareFile
+		var sf ShareFile
 		if err := json.Unmarshal(data, &sf); err != nil {
 			return nil, fmt.Errorf("parse share file %s: %w", p, err)
 		}
+
+		// Check expiry.
+		if !sf.ExpiresAt.IsZero() && now.After(sf.ExpiresAt) {
+			return nil, fmt.Errorf("share file %s expired at %s — ask %s to re-collect",
+				p, sf.ExpiresAt.Format(time.RFC3339), sf.Member)
+		}
+
+		// Validate vault and entry binding.
+		if sf.Vault != "" && sf.Vault != vaultName {
+			return nil, fmt.Errorf("share file %s is for vault %q, not %q", p, sf.Vault, vaultName)
+		}
+		if sf.Entry != "" && sf.Entry != entryName {
+			return nil, fmt.Errorf("share file %s is for entry %q, not %q", p, sf.Entry, entryName)
+		}
+
 		s, err := crypto.UnmarshalShare(sf.Share)
 		if err != nil {
 			return nil, fmt.Errorf("unmarshal share from %s: %w", p, err)
@@ -110,7 +125,6 @@ func loadShareFiles(paths []string) ([]*crypto.ShamirShare, error) {
 }
 
 func printOrCopy(payload *entry.Payload, name, field string, noClip bool) error {
-
 	var value string
 	var fieldName string
 	switch field {
@@ -137,7 +151,6 @@ func printOrCopy(payload *entry.Payload, name, field string, noClip bool) error 
 		value = payload.Notes
 		fieldName = "notes"
 	default:
-		// Check custom fields.
 		if cv, ok := payload.Fields[field]; ok {
 			value = cv
 			fieldName = field

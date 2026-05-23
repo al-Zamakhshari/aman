@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/al-Zamakhshari/aman/internal/crypto"
 	"github.com/al-Zamakhshari/aman/internal/entry"
@@ -22,7 +23,8 @@ can use with 'aman get --shares'.
 
 Examples:
   aman collect prod-db-password --out /tmp/alice.share
-  aman collect prod-db-password   # saved to <name>-<identity>.share`,
+  aman collect prod-db-password --ttl 4h
+  aman collect prod-db-password   # saved to <name>-<identity>.share, expires in 24h`,
 	Args: cobra.ExactArgs(1),
 	RunE: runCollect,
 }
@@ -30,10 +32,21 @@ Examples:
 func init() {
 	rootCmd.AddCommand(collectCmd)
 	collectCmd.Flags().String("out", "", "output path for the .share file (default: <name>-<identity>.share)")
+	collectCmd.Flags().Duration("ttl", 24*time.Hour, "share file validity window (default: 24h)")
+}
+
+// ShareFile is the JSON wrapper written by 'aman collect'.
+type ShareFile struct {
+	Vault     string          `json:"vault"`
+	Entry     string          `json:"entry"`
+	Member    string          `json:"member"`
+	ExpiresAt time.Time       `json:"expires_at"`
+	Share     json.RawMessage `json:"share"`
 }
 
 func runCollect(cmd *cobra.Command, args []string) error {
 	name := args[0]
+	ttl, _ := cmd.Flags().GetDuration("ttl")
 
 	identity, err := identityName()
 	if err != nil {
@@ -51,7 +64,11 @@ func runCollect(cmd *cobra.Command, args []string) error {
 	}
 
 	// Load the raw entry.
-	e, err := entry.Load(entry.EntryPath(v.Dir, name))
+	entryPath, err := entry.EntryPath(v.Dir, name)
+	if err != nil {
+		return err
+	}
+	e, err := entry.Load(entryPath)
 	if err != nil {
 		return err
 	}
@@ -65,23 +82,17 @@ func runCollect(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("collect share: %w", err)
 	}
 
-	data, err := crypto.MarshalShare(share)
+	shareData, err := crypto.MarshalShare(share)
 	if err != nil {
 		return fmt.Errorf("marshal share: %w", err)
 	}
 
-	// Wrap with metadata so the combiner knows which entry/vault this belongs to.
-	type shareFile struct {
-		Vault  string          `json:"vault"`
-		Entry  string          `json:"entry"`
-		Member string          `json:"member"`
-		Share  json.RawMessage `json:"share"`
-	}
-	wrapper := shareFile{
-		Vault:  v.Cfg.Name,
-		Entry:  name,
-		Member: identity,
-		Share:  data,
+	wrapper := ShareFile{
+		Vault:     v.Cfg.Name,
+		Entry:     name,
+		Member:    identity,
+		ExpiresAt: time.Now().UTC().Add(ttl),
+		Share:     shareData,
 	}
 	out, err := json.MarshalIndent(wrapper, "", "  ")
 	if err != nil {
@@ -98,8 +109,9 @@ func runCollect(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("✓ Share for %q saved → %s\n", name, outPath)
-	fmt.Printf("  Send this file to the person running 'aman get --shares ...' to reconstruct the secret.\n")
+	fmt.Printf("  Expires : %s\n", wrapper.ExpiresAt.Format(time.RFC3339))
 	fmt.Printf("  Required: %d of %d shares\n", e.Threshold, len(e.Recipients))
+	fmt.Printf("  Send this file to the person running 'aman get --shares ...'\n")
 	return nil
 }
 
