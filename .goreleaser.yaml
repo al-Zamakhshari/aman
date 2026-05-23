@@ -1,0 +1,92 @@
+version: 2
+
+project_name: aman
+
+before:
+  hooks:
+    - go mod tidy
+    - go test ./...
+
+builds:
+  - id: aman
+    main: .
+    binary: aman
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+
+archives:
+  - id: aman
+    name_template: "aman_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+signs:
+  - artifacts: checksum
+    args:
+      - "--batch"
+      - "--local-user"
+      - "{{ .Env.GPG_FINGERPRINT }}"
+      - "--output"
+      - "${signature}"
+      - "--detach-sign"
+      - "${artifact}"
+
+brews:
+  - name: aman
+    repository:
+      owner: al-Zamakhshari
+      name: homebrew-tap
+    homepage: "https://github.com/al-Zamakhshari/aman"
+    description: "أمان — quantum-safe team credential manager"
+    license: "MIT"
+    install: |
+      bin.install "aman"
+    test: |
+      system "#{bin}/aman", "--help"
+
+release:
+  github:
+    owner: al-Zamakhshari
+    name: aman
+  name_template: "v{{.Version}}"
+  draft: false
+  prerelease: auto
+  footer: |
+    ## Verification
+    ```
+    sha256sum -c checksums.txt
+    ```
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - Merge pull request
+      - Merge branch

@@ -1,0 +1,18 @@
+# Binaries
+aman
+dist/
+
+# Keys — never commit private keys
+*.key
+~/.aman/
+
+# Test artifacts
+/tmp/aman-test/
+
+# Go
+vendor/
+*.test
+
+# OS
+.DS_Store
+Thumbs.db
