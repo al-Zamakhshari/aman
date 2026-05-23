@@ -114,7 +114,7 @@ func runImport(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
-		err := v.Add(r.Name, identity, r.Payload, recipients, kp, r.Tags)
+		err := v.Add(r.Name, identity, r.Payload, recipients, kp, r.Tags, 1)
 		if err != nil {
 			if skipExisting && isAlreadyExists(err) {
 				fmt.Printf("  skip  %s (already exists)\n", r.Name)

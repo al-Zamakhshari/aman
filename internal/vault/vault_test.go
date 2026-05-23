@@ -69,7 +69,7 @@ func TestAddGet(t *testing.T) {
 		URL:      "https://acme.com",
 	}
 
-	if err := v.Add("acme-login", "alice", payload, []string{"alice"}, alice, nil); err != nil {
+	if err := v.Add("acme-login", "alice", payload, []string{"alice"}, alice, nil, 1); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 
@@ -92,8 +92,8 @@ func TestAddDuplicate(t *testing.T) {
 	registerMember(t, v, "alice", alice)
 	p := &entry.Payload{Password: "x"}
 
-	v.Add("key", "alice", p, []string{"alice"}, alice, nil) //nolint:errcheck
-	err := v.Add("key", "alice", p, []string{"alice"}, alice, nil)
+	v.Add("key", "alice", p, []string{"alice"}, alice, nil, 1) //nolint:errcheck
+	err := v.Add("key", "alice", p, []string{"alice"}, alice, nil, 1)
 	if err == nil {
 		t.Fatal("expected duplicate error, got nil")
 	}
@@ -108,8 +108,8 @@ func TestList(t *testing.T) {
 	registerMember(t, v, "alice", alice)
 	registerMember(t, v, "bob", bob)
 
-	v.Add("shared", "alice", &entry.Payload{Password: "a"}, []string{"alice", "bob"}, alice, []string{"prod"}) //nolint:errcheck
-	v.Add("alice-only", "alice", &entry.Payload{Password: "b"}, []string{"alice"}, alice, nil)                  //nolint:errcheck
+	v.Add("shared", "alice", &entry.Payload{Password: "a"}, []string{"alice", "bob"}, alice, []string{"prod"}, 1) //nolint:errcheck
+	v.Add("alice-only", "alice", &entry.Payload{Password: "b"}, []string{"alice"}, alice, nil, 1)                  //nolint:errcheck
 
 	items, err := v.List("alice")
 	if err != nil {
@@ -152,7 +152,7 @@ func TestGrantRevoke(t *testing.T) {
 	registerMember(t, v, "carol", carol)
 
 	// Add entry for alice only.
-	v.Add("secret", "alice", &entry.Payload{Password: "pw"}, []string{"alice"}, alice, nil) //nolint:errcheck
+	v.Add("secret", "alice", &entry.Payload{Password: "pw"}, []string{"alice"}, alice, nil, 1) //nolint:errcheck
 
 	// Bob cannot decrypt yet.
 	_, err := v.Get("secret", "bob", bob)
@@ -201,7 +201,7 @@ func TestDelete(t *testing.T) {
 	alice := genKP(t)
 	registerMember(t, v, "alice", alice)
 
-	v.Add("todelete", "alice", &entry.Payload{Password: "bye"}, []string{"alice"}, alice, nil) //nolint:errcheck
+	v.Add("todelete", "alice", &entry.Payload{Password: "bye"}, []string{"alice"}, alice, nil, 1) //nolint:errcheck
 
 	if err := v.Delete("todelete", "alice"); err != nil {
 		t.Fatalf("Delete: %v", err)

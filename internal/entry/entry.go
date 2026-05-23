@@ -2,6 +2,10 @@
 // Each entry is a standalone JSON file encrypted to a specific list of recipients.
 // No shared vault key exists — each recipient has their own copy of the FEK,
 // wrapped with their individual ML-KEM-768+X25519 public key.
+//
+// When Threshold = 1 (default): each recipient block wraps the full FEK.
+// When Threshold = K > 1: each recipient block wraps one Shamir share of the FEK;
+// K recipients must cooperate to reconstruct the FEK.
 package entry
 
 import (
@@ -30,35 +34,35 @@ type Payload struct {
 
 // Entry is the on-disk envelope for a single secret.
 type Entry struct {
-	Version    int                      `json:"version"`
-	Name       string                   `json:"name"`
-	CreatedBy  string                   `json:"created_by"`
-	CreatedAt  time.Time                `json:"created_at"`
-	UpdatedAt  time.Time                `json:"updated_at"`
-	Recipients []string                 `json:"recipients"`
-	Threshold  int                      `json:"threshold"` // 1 = any recipient; K>1 = M-of-N (future)
-	Blocks     []crypto.RecipientBlock  `json:"recipient_blocks"`
-	Nonce      []byte                   `json:"nonce"`
-	Ciphertext []byte                   `json:"ciphertext"`
-	Signature  []byte                   `json:"signature"`
-	Tags       []string                 `json:"tags,omitempty"`
+	Version    int                     `json:"version"`
+	Name       string                  `json:"name"`
+	CreatedBy  string                  `json:"created_by"`
+	CreatedAt  time.Time               `json:"created_at"`
+	UpdatedAt  time.Time               `json:"updated_at"`
+	Recipients []string                `json:"recipients"`
+	Threshold  int                     `json:"threshold"` // 1 = any recipient; K>1 = M-of-N Shamir
+	Blocks     []crypto.RecipientBlock `json:"recipient_blocks"`
+	Nonce      []byte                  `json:"nonce"`
+	Ciphertext []byte                  `json:"ciphertext"`
+	Signature  []byte                  `json:"signature"`
+	Tags       []string                `json:"tags,omitempty"`
 }
 
-// sigPayload returns the stable bytes that are signed over an entry.
-// Excludes the Signature field itself.
+// signable is the subset of Entry fields that are signed.
+type signable struct {
+	Version    int                     `json:"version"`
+	Name       string                  `json:"name"`
+	CreatedBy  string                  `json:"created_by"`
+	CreatedAt  time.Time               `json:"created_at"`
+	Recipients []string                `json:"recipients"`
+	Threshold  int                     `json:"threshold"`
+	Blocks     []crypto.RecipientBlock `json:"recipient_blocks"`
+	Nonce      []byte                  `json:"nonce"`
+	Ciphertext []byte                  `json:"ciphertext"`
+	Tags       []string                `json:"tags,omitempty"`
+}
+
 func sigPayload(e *Entry) ([]byte, error) {
-	type signable struct {
-		Version    int                     `json:"version"`
-		Name       string                  `json:"name"`
-		CreatedBy  string                  `json:"created_by"`
-		CreatedAt  time.Time               `json:"created_at"`
-		Recipients []string                `json:"recipients"`
-		Threshold  int                     `json:"threshold"`
-		Blocks     []crypto.RecipientBlock `json:"recipient_blocks"`
-		Nonce      []byte                  `json:"nonce"`
-		Ciphertext []byte                  `json:"ciphertext"`
-		Tags       []string                `json:"tags,omitempty"`
-	}
 	return json.Marshal(signable{
 		Version:    e.Version,
 		Name:       e.Name,
@@ -74,6 +78,8 @@ func sigPayload(e *Entry) ([]byte, error) {
 }
 
 // Seal creates and signs a new entry, encrypting payload to all recipients.
+// threshold=1: any recipient can decrypt independently.
+// threshold=K>1: K recipients must cooperate (Shamir M-of-N).
 func Seal(
 	name string,
 	createdBy string,
@@ -83,8 +89,16 @@ func Seal(
 	signerKP *crypto.KeyPair,
 	vaultName string,
 	tags []string,
+	threshold int,
 ) (*Entry, error) {
-	// 1. Generate a fresh FEK in a guarded buffer.
+	if threshold < 1 {
+		threshold = 1
+	}
+	if threshold > len(recipients) {
+		return nil, fmt.Errorf("threshold %d exceeds recipient count %d", threshold, len(recipients))
+	}
+
+	// 1. Generate a fresh FEK.
 	fekBuf := memguard.NewBufferRandom(32)
 	defer fekBuf.Destroy()
 	fek := fekBuf.Bytes()
@@ -102,25 +116,17 @@ func Seal(
 		return nil, fmt.Errorf("encrypt payload: %w", err)
 	}
 
-	// 3. Wrap the FEK for each recipient.
-	blocks := make([]crypto.RecipientBlock, 0, len(recipients))
-	for _, r := range recipients {
-		bundle, ok := bundles[r]
-		if !ok {
-			return nil, fmt.Errorf("no public key found for recipient %q", r)
-		}
-		kemPub, err := crypto.KEMPublicFromBundle(bundle)
-		if err != nil {
-			return nil, fmt.Errorf("parse kem pub for %q: %w", r, err)
-		}
-		sealedFEK, err := crypto.WrapFEK(kemPub, fek, info)
-		if err != nil {
-			return nil, fmt.Errorf("wrap fek for %q: %w", r, err)
-		}
-		blocks = append(blocks, crypto.RecipientBlock{
-			ID:        r,
-			SealedFEK: sealedFEK,
-		})
+	// 3a. Threshold=1: wrap the full FEK for each recipient.
+	// 3b. Threshold>1: Shamir-split the FEK into N shares, wrap one share per recipient.
+	var blocks []crypto.RecipientBlock
+
+	if threshold == 1 {
+		blocks, err = wrapFullFEK(fek, recipients, bundles, info)
+	} else {
+		blocks, err = wrapShamirShares(fek, recipients, bundles, info, threshold)
+	}
+	if err != nil {
+		return nil, err
 	}
 
 	now := time.Now().UTC()
@@ -131,7 +137,7 @@ func Seal(
 		CreatedAt:  now,
 		UpdatedAt:  now,
 		Recipients: recipients,
-		Threshold:  1,
+		Threshold:  threshold,
 		Blocks:     blocks,
 		Nonce:      nonce,
 		Ciphertext: ciphertext,
@@ -152,21 +158,18 @@ func Seal(
 	return e, nil
 }
 
-// Open decrypts an entry using the caller's private key.
+// Open decrypts a threshold=1 entry using the caller's private key.
 func Open(e *Entry, myName string, myKP *crypto.KeyPair, vaultName string) (*Payload, error) {
-	// 1. Find our recipient block.
-	var block *crypto.RecipientBlock
-	for i := range e.Blocks {
-		if e.Blocks[i].ID == myName {
-			block = &e.Blocks[i]
-			break
-		}
-	}
-	if block == nil {
-		return nil, fmt.Errorf("you (%s) are not a recipient of this entry", myName)
+	if e.Threshold > 1 {
+		return nil, fmt.Errorf("%q requires %d-of-%d cooperation — use 'aman collect' to gather shares, then 'aman get --shares'",
+			e.Name, e.Threshold, len(e.Recipients))
 	}
 
-	// 2. Unwrap FEK.
+	block := findBlock(e, myName)
+	if block == nil {
+		return nil, fmt.Errorf("you (%s) are not a recipient of %q", myName, e.Name)
+	}
+
 	info := crypto.EntryInfo(vaultName, e.Name)
 	fek, err := crypto.UnwrapFEK(myKP.KEMPriv, block.SealedFEK, info)
 	if err != nil {
@@ -174,18 +177,51 @@ func Open(e *Entry, myName string, myKP *crypto.KeyPair, vaultName string) (*Pay
 	}
 	defer memguard.WipeBytes(fek)
 
-	// 3. Decrypt payload.
-	plain, err := crypto.DecryptPayload(fek, e.Nonce, e.Ciphertext)
+	return decryptPayload(fek, e.Nonce, e.Ciphertext)
+}
+
+// CollectShare unwraps the caller's Shamir share from a threshold entry.
+// The returned share must be saved and combined with K-1 other shares via CombineShares.
+func CollectShare(e *Entry, myName string, myKP *crypto.KeyPair, vaultName string) (*crypto.ShamirShare, error) {
+	if e.Threshold == 1 {
+		return nil, fmt.Errorf("%q is not a threshold entry — use 'aman get' directly", e.Name)
+	}
+
+	block := findBlock(e, myName)
+	if block == nil {
+		return nil, fmt.Errorf("you (%s) are not a recipient of %q", myName, e.Name)
+	}
+
+	info := crypto.EntryInfo(vaultName, e.Name)
+	shareBytes, err := crypto.UnwrapFEK(myKP.KEMPriv, block.SealedFEK, info)
 	if err != nil {
 		return nil, err
 	}
-	defer memguard.WipeBytes(plain)
 
-	var p Payload
-	if err := json.Unmarshal(plain, &p); err != nil {
-		return nil, fmt.Errorf("unmarshal payload: %w", err)
+	return crypto.UnmarshalShare(shareBytes)
+}
+
+// OpenWithShares decrypts a threshold entry by combining K Shamir shares.
+func OpenWithShares(e *Entry, shares []*crypto.ShamirShare) (*Payload, error) {
+	if e.Threshold == 1 {
+		return nil, fmt.Errorf("use Open for non-threshold entries")
 	}
-	return &p, nil
+	if len(shares) < e.Threshold {
+		return nil, fmt.Errorf("need %d shares, got %d", e.Threshold, len(shares))
+	}
+
+	plain := make([]crypto.ShamirShare, len(shares))
+	for i, s := range shares {
+		plain[i] = *s
+	}
+
+	fek, err := crypto.CombineFEK(plain)
+	if err != nil {
+		return nil, fmt.Errorf("combine shares: %w", err)
+	}
+	defer memguard.WipeBytes(fek)
+
+	return decryptPayload(fek, e.Nonce, e.Ciphertext)
 }
 
 // VerifySig checks the entry's ML-DSA-87 signature against the creator's public bundle.
@@ -201,7 +237,7 @@ func VerifySig(e *Entry, creatorBundle *crypto.PublicBundle) (bool, error) {
 	return crypto.Verify(sigPub, sp, e.Signature), nil
 }
 
-// Fingerprint returns a short stable ID for an entry (first 8 hex chars of SHA-256 of name).
+// Fingerprint returns a short stable ID for an entry.
 func Fingerprint(name string) string {
 	h := sha256.Sum256([]byte(name))
 	return fmt.Sprintf("%x", h[:4])
@@ -235,4 +271,81 @@ func Load(path string) (*Entry, error) {
 		return nil, fmt.Errorf("parse entry %s: %w", filepath.Base(path), err)
 	}
 	return &e, nil
+}
+
+// ── internal helpers ─────────────────────────────────────────────────────────
+
+func findBlock(e *Entry, name string) *crypto.RecipientBlock {
+	for i := range e.Blocks {
+		if e.Blocks[i].ID == name {
+			return &e.Blocks[i]
+		}
+	}
+	return nil
+}
+
+func decryptPayload(fek, nonce, ciphertext []byte) (*Payload, error) {
+	plain, err := crypto.DecryptPayload(fek, nonce, ciphertext)
+	if err != nil {
+		return nil, err
+	}
+	defer memguard.WipeBytes(plain)
+
+	var p Payload
+	if err := json.Unmarshal(plain, &p); err != nil {
+		return nil, fmt.Errorf("unmarshal payload: %w", err)
+	}
+	return &p, nil
+}
+
+func wrapFullFEK(fek []byte, recipients []string, bundles map[string]*crypto.PublicBundle, info []byte) ([]crypto.RecipientBlock, error) {
+	blocks := make([]crypto.RecipientBlock, 0, len(recipients))
+	for _, r := range recipients {
+		bundle, ok := bundles[r]
+		if !ok {
+			return nil, fmt.Errorf("no public key for recipient %q", r)
+		}
+		kemPub, err := crypto.KEMPublicFromBundle(bundle)
+		if err != nil {
+			return nil, fmt.Errorf("parse kem pub for %q: %w", r, err)
+		}
+		sealed, err := crypto.WrapFEK(kemPub, fek, info)
+		if err != nil {
+			return nil, fmt.Errorf("wrap fek for %q: %w", r, err)
+		}
+		blocks = append(blocks, crypto.RecipientBlock{ID: r, SealedFEK: sealed})
+	}
+	return blocks, nil
+}
+
+func wrapShamirShares(fek []byte, recipients []string, bundles map[string]*crypto.PublicBundle, info []byte, threshold int) ([]crypto.RecipientBlock, error) {
+	shares, err := crypto.SplitFEK(fek, threshold, len(recipients))
+	if err != nil {
+		return nil, fmt.Errorf("shamir split: %w", err)
+	}
+
+	blocks := make([]crypto.RecipientBlock, 0, len(recipients))
+	for i, r := range recipients {
+		bundle, ok := bundles[r]
+		if !ok {
+			return nil, fmt.Errorf("no public key for recipient %q", r)
+		}
+		kemPub, err := crypto.KEMPublicFromBundle(bundle)
+		if err != nil {
+			return nil, fmt.Errorf("parse kem pub for %q: %w", r, err)
+		}
+
+		// Serialise the share so it can be HPKE-sealed.
+		shareBytes, err := crypto.MarshalShare(&shares[i])
+		if err != nil {
+			return nil, fmt.Errorf("marshal share for %q: %w", r, err)
+		}
+
+		sealed, err := crypto.WrapFEK(kemPub, shareBytes, info)
+		if err != nil {
+			return nil, fmt.Errorf("wrap share for %q: %w", r, err)
+		}
+		blocks = append(blocks, crypto.RecipientBlock{ID: r, SealedFEK: sealed})
+	}
+	return blocks, nil
 }

@@ -109,7 +109,7 @@ func runEdit(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	newEntry, err := entry.Seal(name, identity, payload, e.Recipients, bundles, kp, v.Cfg.Name, e.Tags)
+	newEntry, err := entry.Seal(name, identity, payload, e.Recipients, bundles, kp, v.Cfg.Name, e.Tags, e.Threshold)
 	if err != nil {
 		return fmt.Errorf("re-seal: %w", err)
 	}

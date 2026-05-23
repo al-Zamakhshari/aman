@@ -98,6 +98,7 @@ func Open(dir string) (*Vault, error) {
 }
 
 // Add encrypts a payload and saves it as a new entry.
+// threshold=1 means any single recipient can decrypt; threshold>1 requires M-of-N Shamir cooperation.
 func (v *Vault) Add(
 	name string,
 	actor string,
@@ -105,6 +106,7 @@ func (v *Vault) Add(
 	recipients []string,
 	signerKP *crypto.KeyPair,
 	tags []string,
+	threshold int,
 ) error {
 	path := entry.EntryPath(v.Dir, name)
 	if _, err := os.Stat(path); err == nil {
@@ -116,7 +118,7 @@ func (v *Vault) Add(
 		return err
 	}
 
-	e, err := entry.Seal(name, actor, payload, recipients, bundles, signerKP, v.Cfg.Name, tags)
+	e, err := entry.Seal(name, actor, payload, recipients, bundles, signerKP, v.Cfg.Name, tags, threshold)
 	if err != nil {
 		return fmt.Errorf("seal entry: %w", err)
 	}
@@ -213,7 +215,7 @@ func (v *Vault) Grant(name, newRecipient, actor string, myName string, myKP *cry
 		return err
 	}
 
-	newEntry, err := entry.Seal(name, actor, payload, newRecipients, bundles, myKP, v.Cfg.Name, e.Tags)
+	newEntry, err := entry.Seal(name, actor, payload, newRecipients, bundles, myKP, v.Cfg.Name, e.Tags, e.Threshold)
 	if err != nil {
 		return err
 	}
@@ -266,7 +268,7 @@ func (v *Vault) Revoke(name, removeRecipient, actor string, myName string, myKP 
 		return err
 	}
 
-	newEntry, err := entry.Seal(name, actor, payload, newRecipients, bundles, myKP, v.Cfg.Name, e.Tags)
+	newEntry, err := entry.Seal(name, actor, payload, newRecipients, bundles, myKP, v.Cfg.Name, e.Tags, e.Threshold)
 	if err != nil {
 		return err
 	}
