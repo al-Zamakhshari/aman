@@ -43,22 +43,12 @@ checksum:
   name_template: "checksums.txt"
   algorithm: sha256
 
-signs:
-  - artifacts: checksum
-    args:
-      - "--batch"
-      - "--local-user"
-      - "{{ .Env.GPG_FINGERPRINT }}"
-      - "--output"
-      - "${signature}"
-      - "--detach-sign"
-      - "${artifact}"
-
 brews:
   - name: aman
     repository:
       owner: al-Zamakhshari
       name: homebrew-tap
+      token: "{{ .Env.GORELEASER_TOKEN }}"
     homepage: "https://github.com/al-Zamakhshari/aman"
     description: "أمان — quantum-safe team credential manager"
     license: "MIT"
