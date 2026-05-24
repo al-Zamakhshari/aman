@@ -157,6 +157,8 @@ aman env <name> [--prefix PREFIX]    print as export KEY=VAL
 aman log [--verify] [--action <a>]   audit trail
 
 aman import <file> --to <a,b>        import from Bitwarden / 1Password / LastPass
+
+aman mcp [--vault <dir>]             start MCP server for AI agent integration
 ```
 
 ---
@@ -187,6 +189,59 @@ aman import export.json --to alice --dry-run
 - **Signed entries**: every entry carries an ML-DSA-87 signature from its creator
 - **Tamper-evident log**: `audit.log` is hash-chained — run `aman log --verify` to check integrity
 - **Private keys never leave disk unencrypted**: Argon2id + ChaCha20-Poly1305, memguard for in-memory wiping
+
+---
+
+## AI Agent Integration (MCP)
+
+aman exposes a read-only MCP (Model Context Protocol) server over stdio, letting AI agents
+securely fetch credentials they are authorised to use — without exposing write operations
+(add, grant, revoke) to the agent.
+
+### Claude Desktop / Cursor setup
+
+Add to `~/.config/claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "aman": {
+      "command": "/usr/local/bin/aman",
+      "args": ["mcp", "--vault", "/path/to/team-vault"],
+      "env": {
+        "AMAN_IDENTITY": "alice",
+        "AMAN_PASSPHRASE": "your-passphrase"
+      }
+    }
+  }
+}
+```
+
+### Available tools (3)
+
+| Tool | Description |
+|---|---|
+| `list_credentials` | List credential names and metadata this identity can access. Never returns values. |
+| `get_credential` | Decrypt and return a specific field (`password`, `user`, `url`, `notes`). |
+| `check_access` | Check whether the identity can decrypt a given credential before attempting. |
+
+### Example agent interaction
+
+> **User:** Deploy the staging environment using the credentials from our vault.
+
+The agent calls `list_credentials` to discover available entries, `check_access("staging-deploy")` to confirm access, then `get_credential("staging-deploy", "password")` and uses the value directly as an environment variable — never echoing it in the response.
+
+### Security model for agents
+
+**Prompt injection risk:** a malicious document could trick an agent into calling `get_credential` and leaking the result in visible output. Mitigations built into aman's MCP mode:
+
+- **Read-only surface** — no `add`, `grant`, `revoke`, or `delete` tools are exposed
+- **Identity scoping** — the server operates as a single named identity; it can only access entries that identity was explicitly granted
+- **Deliberate vagueness on errors** — `get_credential` returns "access denied or not found" regardless of which condition applies, preventing enumeration
+- **Audit trail** — every `get` is appended to `audit.log` with hash chaining; run `aman log --verify` to detect unexpected access
+- **Passphrase in env, not args** — `AMAN_PASSPHRASE` is set at server startup, never passed per-call
+
+Instruct your agent to use credential values directly (e.g. as HTTP headers or env vars) without including them in text returned to the user.
 
 ---
 
