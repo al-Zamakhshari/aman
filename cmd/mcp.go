@@ -149,8 +149,10 @@ func runMCP(_ *cobra.Command, _ []string) error {
 
 		payload, err := v.Get(name, identity, kp)
 		if err != nil {
-			// Deliberately vague — don't leak whether the entry exists.
-			return mcp.NewToolResultError("access denied or credential not found"), nil
+			// Deliberately vague — "access denied" regardless of whether the
+			// entry exists or the identity simply lacks a recipient block.
+			// Never distinguish the two: doing so leaks the entry inventory.
+			return mcp.NewToolResultError("access denied"), nil
 		}
 
 		var value string

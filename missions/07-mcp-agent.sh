@@ -100,10 +100,13 @@ url_out=$(mcp_call alice "$VAULT" get_credential '{"name":"github","field":"url"
 assert_contains "get_credential: correct url" "https://github.com" "$url_out"
 
 # ── 7. get_credential — nonexistent entry is vague ────────────────────────────
+# Error must say "access denied" and must NOT distinguish "entry missing" from
+# "no recipient block" — either disclosure leaks the vault's inventory.
 
 denied_out=$(mcp_call alice "$VAULT" get_credential '{"name":"does-not-exist","field":"password"}')
-assert_contains     "get_credential: vague error on missing entry" "access denied" "$denied_out"
-assert_not_contains "get_credential: does not reveal 'not found'"  "not found"     "$denied_out"
+assert_contains     "get_credential: vague error — says access denied" "access denied" "$denied_out"
+assert_not_contains "get_credential: vague error — no 'not found'"     "not found"     "$denied_out"
+assert_not_contains "get_credential: vague error — no credential value" '"value"'      "$denied_out"
 
 # ── 8. get_credential — unknown field returns error ───────────────────────────
 
