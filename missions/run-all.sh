@@ -15,6 +15,7 @@ MISSIONS=(
     /missions/04-tamper-detection.sh
     /missions/05-path-traversal.sh
     /missions/06-import-export.sh
+    /missions/07-mcp-agent.sh
 )
 
 PASSED=0
